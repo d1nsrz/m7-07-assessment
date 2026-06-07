@@ -1,0 +1,46 @@
+registry:
+  backend: mlflow          # self-hosted MLflow on RDS + S3
+  artifact_store: s3://mlops-model-artifacts/recommender/
+
+model:
+  name: product-recommender
+  framework: pytorch
+  task: retrieval          # two-tower embedding model
+
+stages:
+  - name: staging
+    description: Candidate model after passing offline evaluation
+    auto_transition: false
+
+  - name: shadow
+    description: Running on 1% traffic with no UI impact
+    auto_transition: false
+
+  - name: production
+    description: Serving live traffic
+    auto_transition: false
+    requires_approval:
+      approvers:
+        - role: ml-lead
+      tool: mlflow-ui       # approval recorded as a tag in MLflow
+
+lineage_fields:
+  - training_dataset_version   # e.g. "2026-05-28"
+  - training_run_id            # MLflow run ID
+  - git_commit                 # commit that produced the training code
+  - evaluation_report_url      # link to Weights & Biases or MLflow eval run
+  - shadow_test_report_url     # link to shadow test metrics
+  - approved_by                # name of ML lead who clicked approve
+  - approved_at                # ISO timestamp
+  - image_tag                  # recommender:<git-sha>-<model-version>
+
+evaluation_thresholds:
+  ndcg_at_10: 0.38
+  auc: 0.82
+  catalog_coverage_pct: 60.0
+  p95_shadow_latency_ms: 100
+
+versioning:
+  scheme: semantic             # vMAJOR.MINOR.PATCH
+  image_tag_format: "recommender:{git_sha}-{model_version}"
+  # example: recommender:3f8a21b-v2.1.0

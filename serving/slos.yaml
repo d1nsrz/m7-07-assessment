@@ -1,0 +1,60 @@
+service: product-recommender
+environment: production
+version: "1.0"
+
+# These SLOs apply to the synchronous endpoint POST /v1/recommendations only.
+# Batch and async endpoints have separate, looser objectives.
+
+slos:
+  - name: availability
+    description: Fraction of requests that receive a non-5xx response
+    sli:
+      type: request_based
+      good_events: http_requests_total{status!~"5.."}
+      total_events: http_requests_total
+    target: 0.999          # 99.9%
+    window: 30d
+    error_budget_minutes: 43   # 30d * 24h * 60m * 0.001
+
+  - name: latency_p95
+    description: 95th percentile end-to-end latency under 120 ms
+    sli:
+      type: request_based
+      good_events: http_request_duration_seconds_bucket{le="0.120"}
+      total_events: http_requests_total
+    target: 0.95
+    window: 30d
+    # 95% of requests must be under 120 ms — meaning up to 5% can exceed it
+
+  - name: error_rate
+    description: Fraction of requests that are errors (5xx)
+    sli:
+      type: request_based
+      good_events: http_requests_total{status!~"5.."}
+      total_events: http_requests_total
+    target: 0.995          # error rate must stay below 0.5%
+    window: 7d
+
+burn_rate_windows:
+  # Multi-window burn rate for availability SLO
+  # If we burn 2% of the monthly budget in 1h, page immediately
+  - window: 1h
+    burn_rate_threshold: 14.4    # 2% budget / (1h / 720h) = 14.4x
+    severity: critical
+    action: page_on_call
+
+  - window: 6h
+    burn_rate_threshold: 6.0
+    severity: warning
+    action: slack_alert
+
+  - window: 1d
+    burn_rate_threshold: 3.0
+    severity: info
+    action: ticket
+
+rollback_trigger:
+  # These thresholds must match monitoring/alerts.yaml
+  error_rate_pct: 2.0           # > 2% errors for 5 min → rollback
+  p95_latency_ms: 200           # > 200 ms p95 for 5 min → rollback
+  # Both conditions trigger the rollback runbook (runbooks/rollback.md)

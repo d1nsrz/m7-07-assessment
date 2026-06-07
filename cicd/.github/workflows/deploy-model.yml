@@ -1,0 +1,200 @@
+name: Deploy Model
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "container/Dockerfile"
+      - "requirements.txt"
+  workflow_dispatch:
+    inputs:
+      model_version:
+        description: "Model version to bake in (e.g. v2.1.0)"
+        required: true
+        default: "v2.1.0"
+
+env:
+  ECR_REGISTRY: 123456789.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPO: recommender
+  AWS_REGION: us-east-1
+
+jobs:
+  # ── 1. Run unit tests ────────────────────────────────────────────────────────
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest tests/unit -v --tb=short
+
+  # ── 2. Lint OpenAPI spec ─────────────────────────────────────────────────────
+  lint-api:
+    name: Lint OpenAPI spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint openapi.yaml
+        uses: stoplightio/spectral-action@v0.8.10
+        with:
+          file_glob: "api/openapi.yaml"
+
+  # ── 3. Build & scan image ────────────────────────────────────────────────────
+  build:
+    name: Build and scan image
+    runs-on: ubuntu-latest
+    needs: [test, lint-api]
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set model version
+        id: model_ver
+        run: |
+          # If triggered manually use the input, otherwise read from registry config
+          MODEL_VERSION="${{ github.event.inputs.model_version || 'v2.1.0' }}"
+          echo "model_version=${MODEL_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Compute image tag
+        id: meta
+        run: |
+          GIT_SHA=$(git rev-parse --short HEAD)
+          MODEL_VERSION=${{ steps.model_ver.outputs.model_version }}
+          IMAGE_TAG="${ECR_REPO}:${GIT_SHA}-${MODEL_VERSION}"
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "full_tag=${ECR_REGISTRY}/${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          # Tag format: recommender:<git-sha>-<model-version>
+          # example: recommender:3f8a21b-v2.1.0
+          # This matches the scheme in lifecycle/model-registry.yaml
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --build-arg MODEL_VERSION=${{ steps.model_ver.outputs.model_version }} \
+            --build-arg S3_BUCKET=mlops-model-artifacts \
+            -t ${{ steps.meta.outputs.full_tag }} \
+            -f container/Dockerfile .
+
+      - name: Run Trivy security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.full_tag }}
+          format: table
+          exit-code: "1"            # fail the build if HIGH or CRITICAL vulns found
+          severity: HIGH,CRITICAL
+
+      - name: Push to ECR
+        run: docker push ${{ steps.meta.outputs.full_tag }}
+
+  # ── 4. Deploy to staging ─────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to staging
+    runs-on: ubuntu-latest
+    needs: [build]
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update EKS deployment (staging)
+        run: |
+          aws eks update-kubeconfig --name recommender-staging --region ${{ env.AWS_REGION }}
+          kubectl set image deployment/recommender \
+            recommender=${{ env.ECR_REGISTRY }}/${{ needs.build.outputs.image_tag }} \
+            -n recommender-staging
+          kubectl rollout status deployment/recommender -n recommender-staging --timeout=5m
+
+      - name: Smoke test (staging)
+        run: |
+          sleep 15
+          curl -sf -X POST https://staging-api.example.com/recommender/v1/recommendations \
+            -H "Content-Type: application/json" \
+            -H "X-Request-ID: smoke-test-001" \
+            -d '{"user_id": "test_user_001", "n": 5}' \
+            | python -c "import sys,json; d=json.load(sys.stdin); assert len(d['recommendations']) > 0, 'Empty recommendations'; print('Smoke test passed')"
+
+      - name: Run k6 load test (ramp)
+        uses: grafana/k6-action@v0.3.1
+        with:
+          filename: serving/load-test.js
+          flags: --env SCENARIO=ramp --env BASE_URL=https://staging-api.example.com/recommender
+
+  # ── 5. Deploy to production (canary first) ────────────────────────────────────
+  deploy-production:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    environment: production      # requires manual approval in GitHub
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Canary deploy (10% traffic)
+        run: |
+          aws eks update-kubeconfig --name recommender-prod --region ${{ env.AWS_REGION }}
+          # Update the canary deployment with the new image
+          kubectl set image deployment/recommender-canary \
+            recommender=${{ env.ECR_REGISTRY }}/${{ needs.build.outputs.image_tag }} \
+            -n recommender-prod
+          kubectl rollout status deployment/recommender-canary -n recommender-prod --timeout=5m
+          echo "Canary deployed. Monitor for 30 minutes before full rollout."
+
+      - name: Wait and verify canary
+        run: |
+          # Give the canary 30 minutes to accumulate metrics
+          sleep 1800
+          # Check error rate from CloudWatch
+          ERROR_RATE=$(aws cloudwatch get-metric-statistics \
+            --namespace RecommenderService \
+            --metric-name ErrorRate \
+            --dimensions Name=Deployment,Value=canary \
+            --start-time $(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%S) \
+            --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+            --period 1800 --statistics Average \
+            --query 'Datapoints[0].Average' --output text)
+          if (( $(echo "$ERROR_RATE > 2.0" | bc -l) )); then
+            echo "Error rate too high: ${ERROR_RATE}%. Aborting full rollout."
+            exit 1
+          fi
+          echo "Canary healthy. Error rate: ${ERROR_RATE}%"
+
+      - name: Full rollout
+        run: |
+          kubectl set image deployment/recommender \
+            recommender=${{ env.ECR_REGISTRY }}/${{ needs.build.outputs.image_tag }} \
+            -n recommender-prod
+          kubectl rollout status deployment/recommender -n recommender-prod --timeout=10m
+          echo "Full rollout complete: ${{ needs.build.outputs.image_tag }}"

@@ -1,0 +1,144 @@
+service: product-recommender
+environment: production
+alerting_backend: prometheus + alertmanager
+notification_channel: pagerduty  # critical; slack for warning
+
+# ── Latency Alerts ─────────────────────────────────────────────────────────────
+alerts:
+  - name: HighP95Latency_Critical
+    description: p95 latency has exceeded 200 ms for 5 minutes — above the rollback threshold
+    expr: |
+      histogram_quantile(0.95,
+        sum(rate(http_request_duration_seconds_bucket{
+          job="recommender", endpoint="/v1/recommendations"
+        }[5m])) by (le)
+      ) > 0.200
+    for: 5m
+    severity: critical
+    annotations:
+      runbook: runbooks/rollback.md
+      summary: "p95 latency {{ $value | humanizeDuration }} exceeds 200 ms rollback threshold"
+    labels:
+      action: rollback
+
+  - name: HighP95Latency_Warning
+    description: p95 latency between 120 ms and 200 ms — SLO breach but not yet at rollback threshold
+    expr: |
+      histogram_quantile(0.95,
+        sum(rate(http_request_duration_seconds_bucket{
+          job="recommender", endpoint="/v1/recommendations"
+        }[5m])) by (le)
+      ) > 0.120
+    for: 5m
+    severity: warning
+    annotations:
+      summary: "p95 latency {{ $value | humanizeDuration }} exceeds 120 ms SLO"
+
+# ── Error Rate Alerts ──────────────────────────────────────────────────────────
+  - name: HighErrorRate_Critical
+    description: Error rate > 2% for 5 minutes — matches rollback trigger in slos.yaml
+    expr: |
+      sum(rate(http_requests_total{
+        job="recommender", status=~"5.."
+      }[5m]))
+      /
+      sum(rate(http_requests_total{job="recommender"}[5m]))
+      > 0.02
+    for: 5m
+    severity: critical
+    annotations:
+      runbook: runbooks/rollback.md
+      summary: "Error rate {{ $value | humanizePercentage }} exceeds 2% — consider rollback"
+    labels:
+      action: rollback
+
+  - name: HighErrorRate_Warning
+    description: Error rate between 0.5% and 2% — SLO breach, monitor closely
+    expr: |
+      sum(rate(http_requests_total{
+        job="recommender", status=~"5.."
+      }[5m]))
+      /
+      sum(rate(http_requests_total{job="recommender"}[5m]))
+      > 0.005
+    for: 5m
+    severity: warning
+
+# ── Burn Rate Alerts (multi-window) ───────────────────────────────────────────
+  - name: ErrorBudgetBurnRate_1h
+    description: |
+      Burning availability error budget at 14.4x rate in 1h window.
+      At this rate the monthly budget will be exhausted in ~2 days.
+    expr: |
+      (
+        sum(rate(http_requests_total{job="recommender", status=~"5.."}[1h]))
+        /
+        sum(rate(http_requests_total{job="recommender"}[1h]))
+      ) > (0.001 * 14.4)
+    for: 2m
+    severity: critical
+    annotations:
+      summary: "Error budget burning at 14.4x — {{ $value | humanizePercentage }} error rate (1h)"
+      runbook: runbooks/rollback.md
+
+  - name: ErrorBudgetBurnRate_6h
+    description: Elevated burn rate over 6h window — not yet critical but needs attention
+    expr: |
+      (
+        sum(rate(http_requests_total{job="recommender", status=~"5.."}[6h]))
+        /
+        sum(rate(http_requests_total{job="recommender"}[6h]))
+      ) > (0.001 * 6.0)
+    for: 15m
+    severity: warning
+    annotations:
+      summary: "Error budget burning at 6x over 6h window"
+
+# ── Model Version Mismatch Alert ──────────────────────────────────────────────
+  - name: ModelVersionMismatch
+    description: |
+      Multiple different values of X-Model-Version header observed in responses.
+      Indicates that some pods are running an old model version during or after a deploy.
+      Expected: all pods report the same X-Model-Version.
+    expr: |
+      count(
+        count by (model_version) (
+          http_response_header_model_version{job="recommender"}
+        )
+      ) > 1
+    for: 10m
+    severity: warning
+    annotations:
+      summary: "{{ $value }} different X-Model-Version values in flight — possible incomplete rollout"
+      description: |
+        Check which pods are running old versions:
+        kubectl get pods -n recommender-prod -o custom-columns='NAME:.metadata.name,IMAGE:.spec.containers[0].image'
+
+# ── Feature Drift Alert ────────────────────────────────────────────────────────
+  - name: UserFeatureDrift
+    description: |
+      The average cosine similarity between current user feature vectors and a
+      reference distribution has dropped below 0.80. This suggests the input
+      distribution has shifted and the model may be degrading.
+      Triggers retraining pipeline.
+    expr: |
+      avg(recommender_user_feature_cosine_similarity{job="recommender"}) < 0.80
+    for: 30m
+    severity: warning
+    annotations:
+      summary: "User feature drift detected — cosine similarity {{ $value }}"
+      action: trigger_retraining
+
+# ── Replica / Availability Alerts ─────────────────────────────────────────────
+  - name: TooFewReplicas
+    description: Less than 4 healthy replicas running (minimum to serve 800 RPS safely)
+    expr: |
+      kube_deployment_status_replicas_available{
+        namespace="recommender-prod",
+        deployment="recommender"
+      } < 4
+    for: 2m
+    severity: critical
+    annotations:
+      summary: "Only {{ $value }} replicas available — below minimum of 4"
+      runbook: runbooks/rollback.md

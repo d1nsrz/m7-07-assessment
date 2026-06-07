@@ -1,0 +1,17 @@
+{
+  "user_id": "usr_8f3a2b",
+  "model_version": "v2.1.0",
+  "cold_start": false,
+  "recommendations": [
+    { "item_id": "item_10234", "score": 0.923, "rank": 1 },
+    { "item_id": "item_58821", "score": 0.891, "rank": 2 },
+    { "item_id": "item_30017", "score": 0.867, "rank": 3 },
+    { "item_id": "item_72344", "score": 0.845, "rank": 4 },
+    { "item_id": "item_19982", "score": 0.831, "rank": 5 },
+    { "item_id": "item_60123", "score": 0.812, "rank": 6 },
+    { "item_id": "item_44019", "score": 0.800, "rank": 7 },
+    { "item_id": "item_55678", "score": 0.789, "rank": 8 },
+    { "item_id": "item_21390", "score": 0.771, "rank": 9 },
+    { "item_id": "item_83210", "score": 0.754, "rank": 10 }
+  ]
+}

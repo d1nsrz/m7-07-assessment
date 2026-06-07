@@ -1,0 +1,392 @@
+openapi: "3.1.0"
+info:
+  title: Product Recommender API
+  version: "2.1.0"
+  description: |
+    Personalized product recommendation service for the mobile retail app.
+    Exposes three endpoints: synchronous (home-screen), batch (pre-computation),
+    and async job (bulk scoring for experiments).
+
+servers:
+  - url: https://api.example.com/recommender
+    description: Production
+
+tags:
+  - name: recommendations
+    description: Recommendation endpoints
+  - name: jobs
+    description: Async job management
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  model_version:
+                    type: string
+                    example: v2.1.0
+
+  /v1/recommendations:
+    post:
+      summary: Synchronous single-user recommendations
+      description: |
+        Returns top-N product recommendations for one user.
+        This is the primary home-screen endpoint. Must respond within 100 ms
+        (service budget; the remaining 20 ms is for network).
+      operationId: getRecommendations
+      tags: [recommendations]
+      parameters:
+        - name: X-Request-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Client-generated request ID for tracing
+        - name: X-Experiment-ID
+          in: header
+          required: false
+          schema:
+            type: string
+          description: A/B experiment ID assigned by API Gateway
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecommendRequest"
+      responses:
+        "200":
+          description: Recommendations returned successfully
+          headers:
+            X-Model-Version:
+              description: Model version that produced this response
+              schema:
+                type: string
+                example: v2.1.0
+            X-Request-ID:
+              description: Echo of the request ID
+              schema:
+                type: string
+            X-Inference-Ms:
+              description: Server-side inference time in milliseconds
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecommendResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/recommendations/batch:
+    post:
+      summary: Batch recommendations for multiple users
+      description: |
+        Accepts up to 1000 users per request. Used by the nightly Airflow job
+        to pre-warm the Redis cache. Responds synchronously but with a higher
+        latency budget (5 seconds max).
+      operationId: getBatchRecommendations
+      tags: [recommendations]
+      parameters:
+        - name: X-Request-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchRecommendRequest"
+      responses:
+        "200":
+          description: Batch results returned
+          headers:
+            X-Model-Version:
+              description: Model version used
+              schema:
+                type: string
+                example: v2.1.0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchRecommendResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/recommendations/jobs:
+    post:
+      summary: Start async scoring job
+      description: |
+        Starts a background job to score a large user segment.
+        Useful for A/B experiment pre-scoring and offline evaluation.
+        Returns a job ID; poll /v1/recommendations/jobs/{job_id} for status.
+      operationId: startScoringJob
+      tags: [jobs]
+      parameters:
+        - name: X-Request-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JobRequest"
+      responses:
+        "202":
+          description: Job accepted
+          headers:
+            X-Model-Version:
+              schema:
+                type: string
+                example: v2.1.0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /v1/recommendations/jobs/{job_id}:
+    get:
+      summary: Get async job status
+      operationId: getJobStatus
+      tags: [jobs]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Request-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Job status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatus"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  schemas:
+    RecommendRequest:
+      type: object
+      required: [user_id, n]
+      properties:
+        user_id:
+          type: string
+          description: Hashed user identifier
+          example: "usr_8f3a2b"
+        n:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+          description: Number of recommendations to return
+        context:
+          type: object
+          description: Optional request context
+          properties:
+            surface:
+              type: string
+              enum: [home_screen, search, pdp]
+              default: home_screen
+            exclude_item_ids:
+              type: array
+              items:
+                type: string
+              description: Items to exclude from results (e.g. already in cart)
+
+    RecommendResponse:
+      type: object
+      required: [user_id, recommendations, model_version]
+      properties:
+        user_id:
+          type: string
+        recommendations:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecommendedItem"
+        model_version:
+          type: string
+          example: v2.1.0
+        cold_start:
+          type: boolean
+          description: True if user had no history and fallback was used
+
+    RecommendedItem:
+      type: object
+      required: [item_id, score]
+      properties:
+        item_id:
+          type: string
+        score:
+          type: number
+          format: float
+          description: Relevance score (higher is better)
+        rank:
+          type: integer
+
+    BatchRecommendRequest:
+      type: object
+      required: [user_ids, n]
+      properties:
+        user_ids:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          maxItems: 1000
+        n:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+
+    BatchRecommendResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecommendResponse"
+        model_version:
+          type: string
+          example: v2.1.0
+        processed:
+          type: integer
+        failed:
+          type: integer
+
+    JobRequest:
+      type: object
+      required: [segment_id, model_version, n]
+      properties:
+        segment_id:
+          type: string
+          description: Pre-defined user segment to score
+        model_version:
+          type: string
+          description: Model version to use for scoring (for A/B experiments)
+          example: v2.1.0
+        n:
+          type: integer
+          default: 10
+        output_destination:
+          type: string
+          description: S3 URI for job output
+          example: s3://results-bucket/jobs/
+
+    JobAccepted:
+      type: object
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued]
+        estimated_duration_minutes:
+          type: integer
+
+    JobStatus:
+      type: object
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, running, completed, failed]
+        progress_pct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        model_version:
+          type: string
+        output_uri:
+          type: string
+          description: S3 URI, populated when status is completed
+        error_message:
+          type: string
+          description: Populated when status is failed
+
+    ErrorResponse:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code:
+          type: string
+          example: INVALID_USER_ID
+        message:
+          type: string
+        request_id:
+          type: string
+        trace_id:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Request is malformed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: Request is valid JSON but fails business validation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServiceUnavailable:
+      description: Service is overloaded or circuit breaker is open
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"

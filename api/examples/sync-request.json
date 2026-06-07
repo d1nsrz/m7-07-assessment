@@ -1,0 +1,8 @@
+{
+  "user_id": "usr_8f3a2b",
+  "n": 10,
+  "context": {
+    "surface": "home_screen",
+    "exclude_item_ids": ["item_99123", "item_44301"]
+  }
+}

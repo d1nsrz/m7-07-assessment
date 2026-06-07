@@ -1,128 +1,58 @@
-![logo_ironhack_blue 7](https://user-images.githubusercontent.com/23629340/40541063-a07a0a8a-601a-11e8-91b5-2f13e4e6b441.png)
+# MLOps Design Dossier — Scenario X: Personalized In-App Recommendations
 
-# Assessment | Design & Ship an MLOps System
+## Executive Summary
 
-## Overview
+This repo contains a full MLOps design for a personalized product recommendation system in a mobile retail app. The model scores items for each user when they open the home screen. We use a two-tower embedding model that handles both returning users (based on last 30 days history) and cold-start users who have no history yet. The system is designed to handle up to 800 requests per second with a p95 latency under 120 ms end-to-end. A/B testing support is baked in through model versioning and a feature flag layer.
 
-You will produce a complete MLOps design dossier for a fresh business scenario, integrating every artifact you've practiced this week. The deliverable is a single repository that another team could pick up on Monday and start building from. No model training, no notebooks — this is a systems and operations exercise.
+## Architecture Diagram
 
-The assessment covers the full Unit 7 arc: architecture → lifecycle → packaging → API contract → capacity & SLOs → CI/CD & monitoring. You will reuse every skill from the week's labs.
-
-**Time budget:** Friday class. **Submission deadline:** Sunday 7 Jun 2026, 23:59 local time.
-
-## Learning Goals Verified
-
-This assessment verifies that you can:
-
-- Translate a business scenario into a defensible architecture
-- Specify the MLOps lifecycle and registry that surrounds a production model
-- Package a containerized inference service with a slim, secure image
-- Author a complete API contract (OpenAPI 3.1) with sync, batch, and async endpoints
-- Plan capacity, SLOs, and a meaningful load test
-- Wire up CI/CD and monitoring with explicit gates and burn-rate alerts
-- Write a rollback runbook a tired on-call could execute
-
-## Pick One Scenario
-
-You **must** pick a scenario you did **not** use in earlier labs. Choose one:
-
-### Scenario X — Personalized in-app recommendations (B2C retail)
-
-A mobile retail app needs personalized product recommendations rendered on every home-screen load. ~800 RPS at peak, p95 latency budget 120 ms end-to-end. Personalization signals include the user's last 30 days of browsing and purchases. Cold-start users (no history) must still get reasonable recommendations. The product team will run A/B tests against the model continuously.
-
-### Scenario Y — Predictive maintenance for industrial sensors (B2B IoT)
-
-A factory automation product ingests vibration and temperature time-series from ~50,000 industrial sensors. The model predicts which sensors will fail in the next 72 hours. Decisions are made by maintenance schedulers reviewing a daily report; a small subset of critical sensors needs near-real-time alerting (<5 minutes from anomaly to alert). Data arrives via MQTT to a cloud ingestion layer.
-
-### Scenario Z — Medical-imaging triage assistant (B2B healthcare)
-
-A radiology workflow tool routes chest X-ray studies to radiologists based on a model's urgency score. ~30 studies/minute average, 100/minute peak. Each study can be up to 80 MB across multiple DICOM slices. p95 latency budget 4 seconds. **Regulated environment** — every prediction must be auditable; model promotion requires sign-off; data residency rules apply.
-
-## Deliverables
-
-Your submission is a single Git repository with this structure:
+See [architecture/architecture.md](architecture/architecture.md) for the full diagram.
 
 ```
-README.md                          # 1-page navigation + executive summary
-architecture/
-  architecture.md                  # diagram (Mermaid or PNG + source)
-  JUSTIFICATION.md                 # pattern choice and trade-offs
-  adr/
-    0001-<slug>.md                 # the single most consequential trade-off
-    0002-<slug>.md                 # one more
-lifecycle/
-  lifecycle.md                     # end-to-end diagram
-  model-registry.yaml              # registry spec
-container/
-  Dockerfile                       # multi-stage; will not be built, but must be reviewable
-  README.md                        # image plan: bake-vs-mount, base, size estimate
-api/
-  openapi.yaml                     # full 3.1 spec, lint-clean
-  examples/                        # sample request/response payloads
-serving/
-  capacity-plan.md
-  slos.yaml
-  load-test-plan.md
-cicd/
-  .github/workflows/deploy-model.yml
-monitoring/
-  alerts.yaml
-runbooks/
-  rollback.md
+Mobile App → API Gateway → Recommender Service → Feature Store
+                                    ↓
+                             Model (baked in image)
+                                    ↓
+                           Response + X-Model-Version header
 ```
 
-Yes, it's a lot. None of it is new — you've produced every piece this week. The assessment is whether you can put them together **coherently around one scenario** with consistent assumptions, consistent terminology, and no contradictions.
+## Key Numbers
 
-## What "coherent" means
+| Metric | Value |
+|---|---|
+| Target peak RPS | 800 |
+| p95 latency budget | 120 ms end-to-end |
+| Inference budget (service only) | ≤ 70 ms |
+| Availability SLO | 99.9 % |
+| Error rate SLO | < 0.5 % |
+| Model type | Two-tower embedding (~120 MB) |
+| Model storage | Baked into container image |
+| Replicas (steady state) | 6 pods (2 vCPU, 4 GB each) |
+| Instance type | AWS c5.large |
+| Estimated monthly cost | ~$520 |
 
-This is the bar that separates an A from a B:
+## Navigation
 
-- **The capacity plan assumes the same RPS and latency budget the SLO file declares.**
-- **The OpenAPI spec's `X-Model-Version` header appears in the monitoring alert that detects mismatches.**
-- **The rollback runbook's trigger thresholds match the alerts defined in `monitoring/alerts.yaml`.**
-- **The Dockerfile and the capacity plan agree on whether the model is baked in or mounted.**
-- **The CI/CD pipeline tags images with the same scheme the registry expects.**
+| Area | Primary artifact |
+|---|---|
+| Architecture | [architecture/architecture.md](architecture/architecture.md) |
+| Justification | [architecture/JUSTIFICATION.md](architecture/JUSTIFICATION.md) |
+| ADR 0001 | [architecture/adr/0001-bake-model-into-image.md](architecture/adr/0001-bake-model-into-image.md) |
+| ADR 0002 | [architecture/adr/0002-sync-first-api.md](architecture/adr/0002-sync-first-api.md) |
+| Lifecycle | [lifecycle/lifecycle.md](lifecycle/lifecycle.md) |
+| Model registry | [lifecycle/model-registry.yaml](lifecycle/model-registry.yaml) |
+| Dockerfile | [container/Dockerfile](container/Dockerfile) |
+| Container plan | [container/README.md](container/README.md) |
+| API spec | [api/openapi.yaml](api/openapi.yaml) |
+| Capacity plan | [serving/capacity-plan.md](serving/capacity-plan.md) |
+| SLOs | [serving/slos.yaml](serving/slos.yaml) |
+| Load test | [serving/load-test-plan.md](serving/load-test-plan.md) |
+| CI/CD pipeline | [cicd/.github/workflows/deploy-model.yml](cicd/.github/workflows/deploy-model.yml) |
+| Monitoring alerts | [monitoring/alerts.yaml](monitoring/alerts.yaml) |
+| Rollback runbook | [runbooks/rollback.md](runbooks/rollback.md) |
 
-A bag of disconnected artifacts is a fail. A consistent system is a pass.
+## Open Questions
 
-## Top-level README
-
-Your repo's root `README.md` must include:
-
-1. **One-paragraph executive summary** — what the system does and which scenario it solves
-2. **Architecture diagram** — embedded or linked
-3. **Key numbers** — a small table: target RPS, p95 budget, SLO objectives, model size, hardware choice, monthly cost estimate
-4. **Navigation** — links to each sub-directory's primary artifact
-5. **Open questions** — 2–3 honest things you'd need to confirm with the team if you were building this Monday
-
-The README is what a reviewer reads first. Make it earn the rest.
-
-## Submission
-
-Open a Pull Request to the assessment repository with the full directory structure above. Paste the PR link as your deliverable.
-
-**Deadline:** Sunday 7 Jun 2026, 23:59 local time. Late submissions are scored at 70% maximum.
-
-## Grading Rubric
-
-| Area | Weight | What we look for |
-|---|---|---|
-| Architecture coherence | 20% | Diagram, justification, ADRs hang together and address the scenario |
-| Lifecycle & registry | 15% | Specific gates, named approvers, lineage fields, not generic |
-| Container plan | 10% | Multi-stage, bake-vs-mount justified, image size estimate sane |
-| API contract | 15% | OpenAPI lint-clean, sync+batch+async, structured errors, observability headers |
-| Capacity & SLOs | 15% | Latency budget balances, replica math defensible, SLOs measurable |
-| CI/CD pipeline | 10% | Multi-stage, dependency-chained, security scan, env-gated production |
-| Monitoring & alerts | 10% | Multi-window burn-rate, drift signal, model-version mismatch alert |
-| Rollback runbook | 5% | Checklist-format, measurable triggers, sub-page length |
-
-Coherence across these areas is judged in addition to each area individually — a fragmented submission can score well on each piece and still fail.
-
-## Tips
-
-- **Start with the executive summary.** If you can write one paragraph that fits the whole system, the pieces will line up. If you can't, the pieces aren't aligned yet.
-- **Reuse the artifacts** you produced this week as starting points — adapt them to the new scenario, don't rewrite from scratch.
-- **Pick the easy scenario for your context.** Scenario Z (medical imaging) is the hardest because of the regulatory dimension; Scenario X is the most familiar shape. Pick what you can execute well, not what sounds impressive.
-- **Cut, don't pad.** A tight 50-page repo beats a sprawling 150-page one. Be specific.
-
-Good luck.
+1. **Feature store latency** — the 120 ms budget assumes feature fetch takes ≤ 30 ms. We need to confirm with the data team that the online feature store can hit this at 800 RPS before we finalize the capacity plan.
+2. **Cold-start fallback catalog** — right now cold-start users get a popularity-based fallback. Product team should confirm whether that is acceptable or if we need a separate onboarding model.
+3. **A/B test routing** — we assumed the experiment layer lives in the API gateway. If product team wants the model itself to do multi-arm routing, the architecture changes a bit and we should discuss that early.
